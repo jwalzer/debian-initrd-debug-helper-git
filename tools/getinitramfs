@@ -1,0 +1,93 @@
+#!/bin/sh
+#
+# Taken from https://lists.debian.org/debian-kernel/2015/06/msg00215.html
+# All credits go there
+#
+
+
+set -eu
+
+usage()
+{
+	echo "Usage: $(basename $0) [-l] <initramfs file>"
+}
+
+if [ "$#" -eq 0 ] ; then
+	usage >&2
+	exit 1
+fi
+
+OPTIONS=`getopt -o h --long help -n "$0" -- "$@"`
+# Check for non-GNU getopt
+if [ $? != 0 ] ; then echo "W: non-GNU getopt" >&2 ; exit 1 ; fi
+
+eval set -- "$OPTIONS"
+
+while true; do
+        case "$1" in
+        -h|--help)
+		usage
+		exit 0
+	;;
+	--)
+		shift
+		break
+	;;
+	*)
+		echo "Internal error!" >&2
+		exit 1
+	esac
+done
+
+# Read bytes out of a file, checking that they are valid hex digits
+readhex()
+{
+	dd < "$1" bs=1 skip="$2" count="$3" 2> /dev/null | \
+		LANG=C grep -E "^[0-9A-Fa-f]{$3}\$"
+}
+
+# Check for a zero byte in a file
+checkzero()
+{
+	dd < "$1" bs=1 skip="$2" count=1 2> /dev/null | \
+		LANG=C grep -q -z '^$'
+}
+
+for initramfs in "$@" ; do
+	if ! [ -r "${initramfs}" ] ; then
+		echo "Specified file could not be read." >&2
+		exit 1
+	else
+		echo "${initramfs}"
+
+		# There may be a prepended uncompressed archive.  cpio
+		# won't tell us the true size of this so we have to
+		# parse the headers and padding ourselves.  This is
+		# very roughly based on linux/lib/earlycpio.c
+		offset=0
+		while true; do
+			if checkzero "$initramfs" $offset; then
+				offset=$((offset + 4))
+				continue
+			fi
+			magic="$(readhex "$initramfs" $offset 6)" || break
+			test $magic = 070701 || test $magic = 070702 || break
+			namesize=0x$(readhex "$initramfs" $((offset + 94)) 8)
+			filesize=0x$(readhex "$initramfs" $((offset + 54)) 8)
+			offset=$(((offset + 110)))
+			offset=$(((offset + $namesize + 3) & ~3))
+			offset=$(((offset + $filesize + 3) & ~3))
+		done
+
+		if [ $offset -ne 0 ]; then
+			# Extract main archive
+			echo "Multi-segmented initramfs image: $initramfs"
+			dd < "$initramfs" bs="$offset" skip=1 2> /dev/null \
+				> $initramfs.main
+			echo " ==> Extracted main initramfs image: $initramfs.main"
+		else
+			echo "Simple initramfs image: $initramfs"
+		fi
+
+	fi
+done
